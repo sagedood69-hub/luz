@@ -518,6 +518,23 @@
   }
 
   // ---- Conexión Bluetooth ----
+  // UUIDs numéricos estándar: algunos navegadores (p. ej. Bluefy en iOS) no aceptan los nombres
+  const HR_SERVICE = 0x180d;          // Heart Rate
+  const HR_MEASUREMENT = 0x2a37;      // Heart Rate Measurement
+
+  // Paso en curso, para saber dónde falla una conexión
+  let connStep = "";
+
+  // Describe cualquier error, también los que no son objetos Error (Bluefy puede lanzar un número)
+  function describeError(err) {
+    if (err instanceof Error || (err && (err.name || err.message))) {
+      return `${err.name || "Error"}: ${err.message || "(sin mensaje)"}`;
+    }
+    let raw;
+    try { raw = JSON.stringify(err); } catch (e) { raw = String(err); }
+    return `valor ${typeof err} = ${raw}`;
+  }
+
   async function connect() {
     if (!navigator.bluetooth) {
       setStatus("Tu navegador no soporta Web Bluetooth. Usa Chrome en Android.", "err");
@@ -525,9 +542,9 @@
     }
     try {
       setStatus("Buscando dispositivo…");
+      connStep = "elegir dispositivo";
       const device = await navigator.bluetooth.requestDevice({
-        filters: [{ services: ["heart_rate"] }],
-        optionalServices: ["heart_rate"],
+        filters: [{ services: [HR_SERVICE] }],
       });
       if (state.device) state.device.removeEventListener("gattserverdisconnected", onDisconnected);
       state.device = device;
@@ -537,9 +554,11 @@
       setStatus("Conectando…");
       await setupGatt();
     } catch (err) {
-      log(`Error: ${err && err.name} — ${err && err.message || err}`);
+      log(`Error en el paso "${connStep}" → ${describeError(err)}`);
+      if (!(err && err.name === "NotFoundError"))
+        log("💡 Prueba a olvidar el H10 en los ajustes Bluetooth del dispositivo y volver a emparejarlo.");
       if (err && err.name === "NotFoundError") setStatus("Conexión cancelada", "err");
-      else setStatus("Error: " + (err && err.message || err), "err");
+      else setStatus(`Error al ${connStep}`, "err");
     }
   }
 
@@ -547,13 +566,18 @@
   // Se usa tanto en la primera conexión como en cada reconexión.
   async function setupGatt() {
     const device = state.device;
+    connStep = "conectar (GATT)";
     const server = await device.gatt.connect();
     log("GATT conectado");
-    const service = await server.getPrimaryService("heart_rate");
-    const char = await service.getCharacteristic("heart_rate_measurement");
+    connStep = "obtener el servicio de ritmo cardíaco";
+    const service = await server.getPrimaryService(HR_SERVICE);
+    log("Servicio de ritmo cardíaco encontrado");
+    connStep = "obtener la medición de ritmo cardíaco";
+    const char = await service.getCharacteristic(HR_MEASUREMENT);
     if (state.char) state.char.removeEventListener("characteristicvaluechanged", handleMeasurement);
     state.char = char;
     char.addEventListener("characteristicvaluechanged", handleMeasurement);
+    connStep = "activar notificaciones";
     await char.startNotifications();
     log("Notificaciones activadas, esperando datos…");
     notifCount = 0;
@@ -591,7 +615,7 @@
         await setupGatt();
         log("✅ Reconectado");
       } catch (err) {
-        log(`Reintento ${state.reconnectAttempts} falló: ${err && err.message || err}`);
+        log(`Reintento ${state.reconnectAttempts} falló en "${connStep}" → ${describeError(err)}`);
         if (!state.userDisconnect && !state.connected) scheduleReconnect();
       }
     }, delay);
@@ -684,6 +708,7 @@
     light.style.opacity = 0;
     clearTimeout(state.bpmTimer); state.bpmTimer = null;
     if (state.mode === "glow") applyGlow(); else restartBpmTimer();
+    saveSettings();
   });
 
   $("sync").addEventListener("click", e => {
@@ -691,22 +716,27 @@
     state.sync = b.dataset.sync;
     [...$("sync").children].forEach(x => x.classList.toggle("active", x === b));
     restartBpmTimer();
+    saveSettings();
   });
 
   $("color").addEventListener("input", e => {
     state.color = e.target.value;
     updateColor();
+    saveSettings();
   });
 
   $("flashDur").addEventListener("input", e => {
     state.flashDur = +e.target.value; $("flashDurVal").textContent = state.flashDur + "ms";
+    saveSettings();
   });
   $("flashMax").addEventListener("input", e => {
     state.flashMax = e.target.value / 100; $("flashMaxVal").textContent = e.target.value + "%";
+    saveSettings();
   });
   $("glowInt").addEventListener("input", e => {
     state.glowInt = e.target.value / 100; $("glowIntVal").textContent = e.target.value + "%";
     if (state.mode === "glow") applyGlow();
+    saveSettings();
   });
   $("zoneOn").addEventListener("change", e => {
     state.zoneOn = e.target.checked;
@@ -723,7 +753,7 @@
     state.zones = zonesFromMax(state.maxHR, state.zones.map(z => z.color));
     saveZones(); renderZones();
   });
-  $("glowPulse").addEventListener("change", e => { state.glowPulse = e.target.checked; });
+  $("glowPulse").addEventListener("change", e => { state.glowPulse = e.target.checked; saveSettings(); });
 
   // ---- Aviso de compatibilidad ----
   const warn = $("warn");
@@ -750,26 +780,50 @@
     document.addEventListener(ev, resetIdle, { passive: true, capture: true }));
 
   // ---- Ajustes de pantalla: guardar y cargar ----
+  // Ajustes que se guardan, con una validación para cada uno
+  const SETTINGS = {
+    mode:          v => v === "flash" || v === "glow",
+    sync:          v => v === "rr" || v === "bpm",
+    color:         v => typeof v === "string" && /^#[0-9a-f]{6}$/i.test(v),
+    flashDur:      v => typeof v === "number",
+    flashMax:      v => typeof v === "number",
+    glowInt:       v => typeof v === "number",
+    glowPulse:     v => typeof v === "boolean",
+    autoReconnect: v => typeof v === "boolean",
+    idleOn:        v => typeof v === "boolean",
+    idleOpacity:   v => typeof v === "number",
+    idleDelay:     v => typeof v === "number",
+  };
   function saveSettings() {
     try {
-      localStorage.setItem("luz-ajustes", JSON.stringify({
-        autoReconnect: state.autoReconnect, idleOn: state.idleOn,
-        idleOpacity: state.idleOpacity, idleDelay: state.idleDelay,
-      }));
+      const s = {};
+      for (const k in SETTINGS) s[k] = state[k];
+      localStorage.setItem("luz-ajustes", JSON.stringify(s));
     } catch (e) { /* ignorar */ }
   }
   function loadSettings() {
     try {
       const s = JSON.parse(localStorage.getItem("luz-ajustes"));
-      if (s) {
-        if (typeof s.autoReconnect === "boolean") state.autoReconnect = s.autoReconnect;
-        if (typeof s.idleOn === "boolean") state.idleOn = s.idleOn;
-        if (typeof s.idleOpacity === "number") state.idleOpacity = s.idleOpacity;
-        if (typeof s.idleDelay === "number") state.idleDelay = s.idleDelay;
-      }
+      if (s) for (const k in SETTINGS) if (SETTINGS[k](s[k])) state[k] = s[k];
     } catch (e) { /* sin almacenamiento: valores por defecto */ }
   }
   function applySettingsUI() {
+    // Modo y sincronía
+    [...$("mode").children].forEach(b => b.classList.toggle("active", b.dataset.mode === state.mode));
+    $("flashOpts").classList.toggle("hidden", state.mode !== "flash");
+    $("glowOpts").classList.toggle("hidden", state.mode !== "glow");
+    [...$("sync").children].forEach(b => b.classList.toggle("active", b.dataset.sync === state.sync));
+    // Color y deslizadores
+    $("color").value = state.color;
+    $("flashDur").value = state.flashDur;
+    $("flashDurVal").textContent = state.flashDur + "ms";
+    $("flashMax").value = Math.round(state.flashMax * 100);
+    $("flashMaxVal").textContent = Math.round(state.flashMax * 100) + "%";
+    $("glowInt").value = Math.round(state.glowInt * 100);
+    $("glowIntVal").textContent = Math.round(state.glowInt * 100) + "%";
+    $("glowPulse").checked = state.glowPulse;
+    // Pantalla
+
     $("autoReconnect").checked = state.autoReconnect;
     $("idleOn").checked = state.idleOn;
     $("idleOpts").classList.toggle("hidden", !state.idleOn);
