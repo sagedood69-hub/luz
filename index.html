@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#0a0a0f">
+<title>Polar H10 · Luz cardíaca</title>
+<link rel="manifest" href="./manifest.json">
+<link rel="icon" href="./icon-192.png">
+<link rel="apple-touch-icon" href="./icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+  :root {
+    --glow: #ff2d55;
+    --bg: #0a0a0f;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%;
+    background: var(--bg);
+    color: #e8e8ef;
+    font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+    overscroll-behavior: none;
+  }
+  body { display: flex; flex-direction: column; }
+
+  /* Capa de luz que ocupa toda la pantalla */
+  #light {
+    position: fixed; inset: 0;
+    background: var(--glow);
+    opacity: 0;
+    pointer-events: none;
+    z-index: 0;
+    transition: opacity 60ms linear;
+  }
+
+  .ui {
+    position: relative; z-index: 1;
+    flex: 1;
+    display: flex; flex-direction: column;
+    padding: 20px; gap: 16px;
+    max-width: 480px; width: 100%; margin: 0 auto;
+    overflow-y: auto;
+  }
+
+  header { text-align: center; }
+  header h1 { font-size: 18px; margin: 0 0 4px; font-weight: 600; letter-spacing: .3px; }
+  header p { margin: 0; font-size: 12px; color: #8a8a9a; }
+
+  .bpm {
+    text-align: center;
+    padding: 10px 0;
+  }
+  .bpm .value {
+    font-size: 84px; font-weight: 800; line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .bpm .unit { font-size: 14px; color: #8a8a9a; letter-spacing: 2px; }
+  .bpm .heart {
+    display: inline-block; font-size: 22px; margin-left: 8px;
+    transform: scale(1); transition: transform .08s ease-out;
+  }
+  .bpm .heart.beat { transform: scale(1.5); }
+
+  .status {
+    text-align: center; font-size: 13px; padding: 8px;
+    border-radius: 10px; background: #14141d; color: #9a9aaa;
+  }
+  .status.ok { color: #4ade80; }
+  .status.err { color: #f87171; }
+
+  .card {
+    background: #12121a; border: 1px solid #22222e;
+    border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 14px;
+  }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .row label { font-size: 14px; }
+  .row .hint { font-size: 11px; color: #70707e; margin-top: 2px; }
+
+  .seg { display: flex; background: #1c1c28; border-radius: 10px; padding: 3px; }
+  .seg button {
+    flex: 1; border: 0; background: transparent; color: #9a9aaa;
+    padding: 8px 10px; border-radius: 8px; font-size: 13px; cursor: pointer;
+  }
+  .seg button.active { background: var(--glow); color: #fff; font-weight: 600; }
+
+  input[type=range] { width: 140px; accent-color: var(--glow); }
+  input[type=color] {
+    width: 42px; height: 30px; border: 0; background: none; padding: 0; cursor: pointer;
+  }
+  .val { font-size: 12px; color: #9a9aaa; min-width: 42px; text-align: right; font-variant-numeric: tabular-nums; }
+
+  button.main {
+    border: 0; border-radius: 14px; padding: 16px;
+    font-size: 16px; font-weight: 700; cursor: pointer; color: #fff;
+    background: var(--glow);
+  }
+  button.main.disconnect { background: #2a2a38; }
+  button:disabled { opacity: .5; }
+
+  .hidden { display: none !important; }
+
+  .warn {
+    font-size: 11px; color: #70707e; text-align: center; line-height: 1.5;
+  }
+  .warn code { color: #9a9aaa; }
+</style>
+</head>
+<body>
+  <div id="light"></div>
+
+  <div class="ui">
+    <header>
+      <h1>💓 Luz cardíaca · Polar H10</h1>
+      <p>Haz brillar o titilar la pantalla al ritmo de tu corazón</p>
+    </header>
+
+    <div class="bpm">
+      <div><span class="value" id="bpm">--</span><span class="heart" id="heart">❤️</span></div>
+      <div class="unit">PULSACIONES / MIN</div>
+    </div>
+
+    <div class="status" id="status">Sin conectar</div>
+
+    <div class="card">
+      <div class="row">
+        <div>
+          <label>Modo</label>
+          <div class="hint">Cómo reacciona la pantalla</div>
+        </div>
+        <div class="seg" id="mode">
+          <button data-mode="flash" class="active">Titilar</button>
+          <button data-mode="glow">Brillar</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Color</label>
+        <input type="color" id="color" value="#ff2d55">
+      </div>
+
+      <!-- Opciones de TITILAR -->
+      <div id="flashOpts">
+        <div class="row">
+          <div>
+            <label>Sincronía</label>
+            <div class="hint">Latido real (RR) o ritmo medio</div>
+          </div>
+          <div class="seg" id="sync">
+            <button data-sync="rr" class="active">Latido real</button>
+            <button data-sync="bpm">Promedio</button>
+          </div>
+        </div>
+        <div class="row">
+          <label>Duración del destello</label>
+          <input type="range" id="flashDur" min="40" max="300" value="120" step="10">
+          <span class="val" id="flashDurVal">120ms</span>
+        </div>
+        <div class="row">
+          <label>Brillo máximo</label>
+          <input type="range" id="flashMax" min="10" max="100" value="100" step="5">
+          <span class="val" id="flashMaxVal">100%</span>
+        </div>
+      </div>
+
+      <!-- Opciones de BRILLAR -->
+      <div id="glowOpts" class="hidden">
+        <div class="row">
+          <label>Intensidad</label>
+          <input type="range" id="glowInt" min="5" max="100" value="45" step="5">
+          <span class="val" id="glowIntVal">45%</span>
+        </div>
+        <div class="row">
+          <div>
+            <label>Color según pulso</label>
+            <div class="hint">Verde→rojo según zona cardíaca</div>
+          </div>
+          <input type="checkbox" id="glowZone" style="accent-color: var(--glow); width:20px; height:20px;">
+        </div>
+        <div class="row" id="pulseRow">
+          <div>
+            <label>Pulsar con el latido</label>
+            <div class="hint">Sube el brillo en cada latido</div>
+          </div>
+          <input type="checkbox" id="glowPulse" checked style="accent-color: var(--glow); width:20px; height:20px;">
+        </div>
+      </div>
+    </div>
+
+    <button class="main" id="connectBtn">Conectar Polar H10</button>
+
+    <p class="warn" id="warn"></p>
+  </div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ---- Estado ----
+  const state = {
+    device: null,
+    char: null,
+    mode: "flash",          // "flash" | "glow"
+    sync: "rr",             // "rr" | "bpm"
+    color: "#ff2d55",
+    flashDur: 120,
+    flashMax: 1.0,
+    glowInt: 0.45,
+    glowZone: false,
+    glowPulse: true,
+    bpm: 0,
+    connected: false,
+    maxHR: 190,             // para zonas de color (aprox 220-30)
+    bpmTimer: null,
+    glowBase: 0,
+    wakeLock: null,
+  };
+
+  const $ = id => document.getElementById(id);
+  const light = $("light");
+  const heartEl = $("heart");
+  const statusEl = $("status");
+
+  // ---- Utilidades de color ----
+  function hexToRgb(hex) {
+    const n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  function setGlowVar(hex) {
+    document.documentElement.style.setProperty("--glow", hex);
+  }
+  // Interpola verde→amarillo→rojo según fracción 0..1
+  function zoneColor(frac) {
+    frac = Math.max(0, Math.min(1, frac));
+    const r = frac < 0.5 ? Math.round(510 * frac) : 255;
+    const g = frac < 0.5 ? 255 : Math.round(510 * (1 - frac));
+    return `rgb(${r},${g},40)`;
+  }
+
+  // ---- Efecto TITILAR ----
+  let flashTimeout = null;
+  function flash() {
+    const max = state.flashMax;
+    light.style.transition = "opacity 40ms ease-out";
+    light.style.opacity = max;
+    clearTimeout(flashTimeout);
+    flashTimeout = setTimeout(() => {
+      light.style.transition = `opacity ${state.flashDur}ms ease-in`;
+      light.style.opacity = 0;
+    }, Math.min(60, state.flashDur / 2));
+  }
+
+  // En modo "promedio" disparamos a intervalos regulares según BPM
+  function restartBpmTimer() {
+    clearInterval(state.bpmTimer);
+    state.bpmTimer = null;
+    if (state.mode === "flash" && state.sync === "bpm" && state.bpm > 0 && state.connected) {
+      const interval = 60000 / state.bpm;
+      state.bpmTimer = setInterval(flash, interval);
+    }
+  }
+
+  // ---- Efecto BRILLAR ----
+  function applyGlow() {
+    if (state.mode !== "glow") return;
+    let base = state.glowInt;
+    if (state.glowZone && state.bpm > 0) {
+      const frac = Math.max(0, (state.bpm - 60) / (state.maxHR - 60));
+      setGlowVar(zoneColor(frac));
+    } else {
+      setGlowVar(state.color);
+    }
+    light.style.transition = "opacity 300ms ease";
+    light.style.opacity = base;
+    state.glowBase = base;
+  }
+  function glowPulse() {
+    if (state.mode !== "glow" || !state.glowPulse) return;
+    const peak = Math.min(1, state.glowBase + 0.35);
+    light.style.transition = "opacity 70ms ease-out";
+    light.style.opacity = peak;
+    clearTimeout(flashTimeout);
+    flashTimeout = setTimeout(() => {
+      light.style.transition = "opacity 260ms ease-in";
+      light.style.opacity = state.glowBase;
+    }, 80);
+  }
+
+  // Se llama en cada latido detectado (RR) o en cada muestra
+  function onBeat() {
+    heartEl.classList.add("beat");
+    setTimeout(() => heartEl.classList.remove("beat"), 90);
+    if (state.mode === "flash" && state.sync === "rr") flash();
+    if (state.mode === "glow") glowPulse();
+  }
+
+  // ---- Parseo del Heart Rate Measurement (0x2A37) ----
+  function parseHR(dataview) {
+    const flags = dataview.getUint8(0);
+    const hr16 = flags & 0x01;
+    const rrPresent = flags & 0x10;
+    let index = 1, bpm;
+    if (hr16) { bpm = dataview.getUint16(index, true); index += 2; }
+    else { bpm = dataview.getUint8(index); index += 1; }
+    if (flags & 0x08) index += 2; // energía gastada, saltar
+    const rr = [];
+    if (rrPresent) {
+      for (; index + 1 < dataview.byteLength; index += 2) {
+        rr.push((dataview.getUint16(index, true) / 1024) * 1000); // ms
+      }
+    }
+    return { bpm, rr };
+  }
+
+  // Cola de latidos RR para reproducir el ritmo real sin saturar
+  let rrQueue = [];
+  function scheduleRR(rr) {
+    // Encadena los intervalos RR recibidos en este paquete
+    let t = 0;
+    for (const ms of rr) {
+      setTimeout(onBeat, t);
+      t += ms;
+    }
+  }
+
+  function handleMeasurement(event) {
+    const { bpm, rr } = parseHR(event.target.value);
+    state.bpm = bpm;
+    $("bpm").textContent = bpm || "--";
+
+    if (rr.length) {
+      scheduleRR(rr);          // latido real
+    } else if (state.mode === "flash" && state.sync === "rr") {
+      onBeat();                // sin RR: pulso por muestra
+    } else {
+      onBeat();
+    }
+
+    if (state.sync === "bpm") restartBpmTimer();
+    if (state.mode === "glow") applyGlow();
+  }
+
+  // ---- Conexión Bluetooth ----
+  async function connect() {
+    if (!navigator.bluetooth) {
+      setStatus("Tu navegador no soporta Web Bluetooth. Usa Chrome en Android.", "err");
+      return;
+    }
+    try {
+      setStatus("Buscando dispositivo…");
+      const device = await navigator.bluetooth.requestDevice({
+        filters: [{ services: ["heart_rate"] }],
+        optionalServices: ["heart_rate"],
+      });
+      state.device = device;
+      device.addEventListener("gattserverdisconnected", onDisconnected);
+
+      setStatus("Conectando…");
+      const server = await device.gatt.connect();
+      const service = await server.getPrimaryService("heart_rate");
+      const char = await service.getCharacteristic("heart_rate_measurement");
+      state.char = char;
+      await char.startNotifications();
+      char.addEventListener("characteristicvaluechanged", handleMeasurement);
+
+      state.connected = true;
+      setStatus(`Conectado a ${device.name || "Polar H10"}`, "ok");
+      $("connectBtn").textContent = "Desconectar";
+      $("connectBtn").classList.add("disconnect");
+
+      await requestWakeLock();
+      if (state.mode === "glow") applyGlow();
+    } catch (err) {
+      if (err && err.name === "NotFoundError") setStatus("Conexión cancelada", "err");
+      else setStatus("Error: " + (err && err.message || err), "err");
+    }
+  }
+
+  function disconnect() {
+    if (state.device && state.device.gatt.connected) state.device.gatt.disconnect();
+    else onDisconnected();
+  }
+
+  function onDisconnected() {
+    state.connected = false;
+    clearInterval(state.bpmTimer); state.bpmTimer = null;
+    light.style.opacity = 0;
+    $("bpm").textContent = "--";
+    setStatus("Desconectado", "err");
+    $("connectBtn").textContent = "Conectar Polar H10";
+    $("connectBtn").classList.remove("disconnect");
+    releaseWakeLock();
+  }
+
+  function setStatus(msg, cls) {
+    statusEl.textContent = msg;
+    statusEl.className = "status" + (cls ? " " + cls : "");
+  }
+
+  // ---- Mantener pantalla encendida ----
+  async function requestWakeLock() {
+    try {
+      if ("wakeLock" in navigator) {
+        state.wakeLock = await navigator.wakeLock.request("screen");
+      }
+    } catch (e) { /* ignorar */ }
+  }
+  function releaseWakeLock() {
+    if (state.wakeLock) { state.wakeLock.release().catch(()=>{}); state.wakeLock = null; }
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && state.connected) requestWakeLock();
+  });
+
+  // ---- Controles de la interfaz ----
+  $("connectBtn").addEventListener("click", () => {
+    if (state.connected) disconnect(); else connect();
+  });
+
+  $("mode").addEventListener("click", e => {
+    const b = e.target.closest("button"); if (!b) return;
+    state.mode = b.dataset.mode;
+    [...$("mode").children].forEach(x => x.classList.toggle("active", x === b));
+    $("flashOpts").classList.toggle("hidden", state.mode !== "flash");
+    $("glowOpts").classList.toggle("hidden", state.mode !== "glow");
+    light.style.opacity = 0;
+    clearInterval(state.bpmTimer); state.bpmTimer = null;
+    if (state.mode === "glow") applyGlow(); else restartBpmTimer();
+  });
+
+  $("sync").addEventListener("click", e => {
+    const b = e.target.closest("button"); if (!b) return;
+    state.sync = b.dataset.sync;
+    [...$("sync").children].forEach(x => x.classList.toggle("active", x === b));
+    restartBpmTimer();
+  });
+
+  $("color").addEventListener("input", e => {
+    state.color = e.target.value;
+    if (!(state.mode === "glow" && state.glowZone)) setGlowVar(state.color);
+  });
+
+  $("flashDur").addEventListener("input", e => {
+    state.flashDur = +e.target.value; $("flashDurVal").textContent = state.flashDur + "ms";
+  });
+  $("flashMax").addEventListener("input", e => {
+    state.flashMax = e.target.value / 100; $("flashMaxVal").textContent = e.target.value + "%";
+  });
+  $("glowInt").addEventListener("input", e => {
+    state.glowInt = e.target.value / 100; $("glowIntVal").textContent = e.target.value + "%";
+    if (state.mode === "glow") applyGlow();
+  });
+  $("glowZone").addEventListener("change", e => { state.glowZone = e.target.checked; applyGlow(); });
+  $("glowPulse").addEventListener("change", e => { state.glowPulse = e.target.checked; });
+
+  // ---- Aviso de compatibilidad ----
+  const warn = $("warn");
+  if (!navigator.bluetooth) {
+    warn.innerHTML = "⚠️ Este navegador no soporta <code>Web Bluetooth</code>.<br>" +
+      "Ábrelo en <b>Chrome para Android</b> (o Edge). iPhone/Safari no es compatible.";
+  } else if (location.protocol !== "https:" && location.hostname !== "localhost") {
+    warn.innerHTML = "⚠️ Web Bluetooth requiere <code>HTTPS</code>. Publica esta página en " +
+      "GitHub Pages / Netlify, o ábrela en <code>localhost</code>.";
+  } else {
+    warn.innerHTML = "Ponte el cinturón (humedece los electrodos), pulsa Conectar y elige tu Polar H10.";
+  }
+
+  setGlowVar(state.color);
+
+  // ---- Registro del service worker (PWA) ----
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("./sw.js").catch(() => {});
+    });
+  }
+})();
+</script>
+</body>
+</html>
