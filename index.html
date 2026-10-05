@@ -190,8 +190,17 @@
     </div>
 
     <button class="main" id="connectBtn">Conectar Polar H10</button>
+    <button class="main disconnect" id="testBtn">Probar luz (sin cinturón)</button>
 
     <p class="warn" id="warn"></p>
+
+    <details class="card" id="diag" open>
+      <summary style="cursor:pointer; font-size:14px;">Diagnóstico</summary>
+      <div class="row"><label>Datos recibidos</label><span class="val" id="dCount">0</span></div>
+      <div class="row"><label>Contacto con la piel</label><span class="val" id="dContact">—</span></div>
+      <div class="row"><label>Intervalos RR</label><span class="val" id="dRR">—</span></div>
+      <pre id="log" style="margin:0; font-size:11px; color:#9a9aaa; white-space:pre-wrap; max-height:160px; overflow-y:auto;"></pre>
+    </details>
   </div>
 
 <script>
@@ -253,13 +262,18 @@
   }
 
   // En modo "promedio" disparamos a intervalos regulares según BPM
+  // Bucle que se reprograma solo, leyendo el BPM actual en cada vuelta
+  function bpmActive() {
+    return state.mode === "flash" && state.sync === "bpm" && state.bpm > 0 && state.connected;
+  }
+  function bpmLoop() {
+    if (!bpmActive()) { state.bpmTimer = null; return; }
+    flash();
+    state.bpmTimer = setTimeout(bpmLoop, 60000 / state.bpm);
+  }
   function restartBpmTimer() {
-    clearInterval(state.bpmTimer);
-    state.bpmTimer = null;
-    if (state.mode === "flash" && state.sync === "bpm" && state.bpm > 0 && state.connected) {
-      const interval = 60000 / state.bpm;
-      state.bpmTimer = setInterval(flash, interval);
-    }
+    if (bpmActive()) { if (!state.bpmTimer) bpmLoop(); }
+    else { clearTimeout(state.bpmTimer); state.bpmTimer = null; }
   }
 
   // ---- Efecto BRILLAR ----
@@ -299,6 +313,9 @@
   // ---- Parseo del Heart Rate Measurement (0x2A37) ----
   function parseHR(dataview) {
     const flags = dataview.getUint8(0);
+    // bits 1-2: 0b11 = contacto detectado, 0b10 = sin contacto, otro = no soportado
+    const contactBits = (flags >> 1) & 0x03;
+    const contact = contactBits === 3 ? "Sí" : contactBits === 2 ? "NO" : "?";
     const hr16 = flags & 0x01;
     const rrPresent = flags & 0x10;
     let index = 1, bpm;
@@ -311,11 +328,20 @@
         rr.push((dataview.getUint16(index, true) / 1024) * 1000); // ms
       }
     }
-    return { bpm, rr };
+    return { bpm, rr, contact };
   }
 
-  // Cola de latidos RR para reproducir el ritmo real sin saturar
-  let rrQueue = [];
+  function log(msg) {
+    const el = $("log");
+    const t = new Date().toLocaleTimeString();
+    el.textContent = `[${t}] ${msg}\n` + el.textContent.slice(0, 4000);
+  }
+  function hex(dv) {
+    return [...new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength)]
+      .map(b => b.toString(16).padStart(2, "0")).join(" ");
+  }
+  let notifCount = 0;
+
   function scheduleRR(rr) {
     // Encadena los intervalos RR recibidos en este paquete
     let t = 0;
@@ -326,17 +352,20 @@
   }
 
   function handleMeasurement(event) {
-    const { bpm, rr } = parseHR(event.target.value);
+    const dv = event.target.value;
+    const { bpm, rr, contact } = parseHR(dv);
+    notifCount++;
+    $("dCount").textContent = notifCount;
+    $("dContact").textContent = contact;
+    $("dRR").textContent = rr.length ? rr.map(x => Math.round(x)).join(", ") + " ms" : "—";
+    if (notifCount <= 5 || notifCount % 20 === 0) log(`#${notifCount} bytes: ${hex(dv)} → ${bpm} bpm, contacto ${contact}`);
+
     state.bpm = bpm;
     $("bpm").textContent = bpm || "--";
 
-    if (rr.length) {
-      scheduleRR(rr);          // latido real
-    } else if (state.mode === "flash" && state.sync === "rr") {
-      onBeat();                // sin RR: pulso por muestra
-    } else {
-      onBeat();
-    }
+    if (bpm === 0) return;     // sin contacto: no hay latidos que mostrar
+    if (rr.length) scheduleRR(rr);   // latido real
+    else onBeat();                   // sin RR: un pulso por muestra
 
     if (state.sync === "bpm") restartBpmTimer();
     if (state.mode === "glow") applyGlow();
@@ -357,13 +386,22 @@
       state.device = device;
       device.addEventListener("gattserverdisconnected", onDisconnected);
 
+      log(`Dispositivo elegido: ${device.name || "(sin nombre)"}`);
       setStatus("Conectando…");
       const server = await device.gatt.connect();
+      log("GATT conectado");
       const service = await server.getPrimaryService("heart_rate");
+      log("Servicio de ritmo cardíaco encontrado");
       const char = await service.getCharacteristic("heart_rate_measurement");
       state.char = char;
-      await char.startNotifications();
       char.addEventListener("characteristicvaluechanged", handleMeasurement);
+      await char.startNotifications();
+      log("Notificaciones activadas, esperando datos…");
+      notifCount = 0;
+      setTimeout(() => {
+        if (state.connected && notifCount === 0)
+          log("⚠️ 5 s sin datos. ¿Llevas el cinturón puesto con los electrodos húmedos? ¿Está conectado a otra app (Polar Beat, Flow, Strava)?");
+      }, 5000);
 
       state.connected = true;
       setStatus(`Conectado a ${device.name || "Polar H10"}`, "ok");
@@ -373,6 +411,7 @@
       await requestWakeLock();
       if (state.mode === "glow") applyGlow();
     } catch (err) {
+      log(`Error: ${err && err.name} — ${err && err.message || err}`);
       if (err && err.name === "NotFoundError") setStatus("Conexión cancelada", "err");
       else setStatus("Error: " + (err && err.message || err), "err");
     }
@@ -384,8 +423,9 @@
   }
 
   function onDisconnected() {
+    if (state.connected) log("El dispositivo se desconectó");
     state.connected = false;
-    clearInterval(state.bpmTimer); state.bpmTimer = null;
+    clearTimeout(state.bpmTimer); state.bpmTimer = null;
     light.style.opacity = 0;
     $("bpm").textContent = "--";
     setStatus("Desconectado", "err");
@@ -419,6 +459,15 @@
     if (state.connected) disconnect(); else connect();
   });
 
+  // Simula 5 latidos a 75 bpm para comprobar el efecto de luz sin el cinturón
+  $("testBtn").addEventListener("click", () => {
+    log("Prueba de luz: 5 latidos simulados");
+    if (state.mode === "glow") applyGlow();
+    for (let i = 0; i < 5; i++) setTimeout(onBeat, i * 800);
+    if (state.mode === "glow" && !state.connected)
+      setTimeout(() => { light.style.opacity = 0; }, 4500);
+  });
+
   $("mode").addEventListener("click", e => {
     const b = e.target.closest("button"); if (!b) return;
     state.mode = b.dataset.mode;
@@ -426,7 +475,7 @@
     $("flashOpts").classList.toggle("hidden", state.mode !== "flash");
     $("glowOpts").classList.toggle("hidden", state.mode !== "glow");
     light.style.opacity = 0;
-    clearInterval(state.bpmTimer); state.bpmTimer = null;
+    clearTimeout(state.bpmTimer); state.bpmTimer = null;
     if (state.mode === "glow") applyGlow(); else restartBpmTimer();
   });
 

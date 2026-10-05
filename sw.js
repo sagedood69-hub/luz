@@ -1,5 +1,6 @@
-// Service worker: cachea la app para que funcione sin conexión una vez abierta.
-const CACHE = "luz-cardiaca-v1";
+// Service worker: primero intenta la red (para recibir siempre la última versión)
+// y si no hay conexión usa la copia en caché.
+const CACHE = "luz-cardiaca-v2";
 const ASSETS = [
   "./",
   "./index.html",
@@ -25,6 +26,12 @@ self.addEventListener("activate", event => {
 self.addEventListener("fetch", event => {
   if (event.request.method !== "GET") return;
   event.respondWith(
-    caches.match(event.request).then(cached => cached || fetch(event.request))
+    fetch(event.request)
+      .then(res => {
+        const copy = res.clone();
+        caches.open(CACHE).then(cache => cache.put(event.request, copy));
+        return res;
+      })
+      .catch(() => caches.match(event.request))
   );
 });
